@@ -25,7 +25,9 @@ with a local Ollama model, with evidence attached. Read `SPEC.md` before any tas
 8. Do not add dependencies without asking. Allowed: typer, rich, pytest, pytest-cov, ruff, mypy.
 9. If a human-owned test or fixture cannot pass because of paths, layout or environment,
    STOP and report the cause. NEVER copy, duplicate, symlink or recreate fixtures to work around it.
-   
+10. Report EVERY file you changed, including config files, in your final summary. Never edit
+    config (pyproject.toml, rules, workflows) unless the task says so; ask first.
+       
 ## Code standards
 - Python 3.11+, type hints on all function signatures, docstrings on public functions.
 - Use `pathlib`, `subprocess.run([...], shell=False)`.

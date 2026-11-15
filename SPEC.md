@@ -81,3 +81,35 @@ files, environment variables, or the network. Trusted code only. Real isolation 
 8. Adopt Windows mitigations and standards: process-tree kill on timeout via taskkill (shell=False),
    unique COVERAGE_FILE per run, normalize line endings to LF before hashing and diffing.
    `models.py` uses stdlib dataclasses only (no Pydantic).
+
+## Decisions v2
+1. **Generation is per-behavior, not whole-file.** `ltf generate` uses AST to enumerate
+   behaviors of the target function: each `raise`, each branch (`if`/`elif`/`else`),
+   and each parameter including boolean flags. The model is asked for ONE short test per
+   behavior with a small token budget (e.g. `num_predict: 200`). The candidate file is
+   assembled from all per-behavior responses after validation.
+2. **Every generated test runs individually.** A test that fails against the original
+   source is QUARANTINED: its pytest failure message is recorded in `report.json` as a
+   DISAGREEMENT, and the candidate file is never modified to make it pass. The generator
+   keeps TWO files per run: `candidate_all.py` (untouched generated output, including
+   quarantined tests) and `candidate_passing.py` (quarantined tests removed). If zero
+   tests pass, the audit phase is skipped and the report says so explicitly.
+   `report.json` records how many tests were quarantined and why.
+3. **Coverage and mutation use only the passing tests.** The audit phase (coverage +
+   mutation) is computed only from tests that survived quarantine. The report states the
+   total generated, the number excluded, and the number used.
+4. **LTF005: comparison whose right side is a call to `pytest.raises(…)`.** This pattern
+   (e.g. `assert result == pytest.raises(ValueError)`) was observed in 2 of the 4
+   distinct M1 samples and always produces a broken test (it errors or fails, never
+   passes). `ltf lint` flags it as LTF005; `ltf generate` also checks generated
+   candidates for it and emits a WARNING before quarantining the affected test. LTF005
+   is reported per offending assertion regardless of other assertions in the same test,
+   because it marks a defect, not mere weakness.
+5. **Report records truncation and generation options.** `report.json` distinguishes
+   `done_reason == "length"` (token-budget truncation) from syntax errors; each is
+   counted separately. The generation options block records at minimum `num_predict`,
+   `temperature`, `seed`, and `repeat_penalty`.
+6. **Reproducibility note.** At `temperature 0` the seed has no effect on Ollama
+   outputs; the report records both temperature and seed regardless so that runs are
+   self-documenting. This caveat is documented in the README, never inside prompt text
+   sent to the model.

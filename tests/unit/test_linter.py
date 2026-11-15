@@ -309,3 +309,118 @@ def test_cli_exit_2_on_syntax_error(tmp_path: Path) -> None:
     p.write_text("def test_foo(\n", encoding="utf-8")
     result = CliRunner().invoke(app, ["lint", str(p)])
     assert result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# LTF005 — comparison operand is a raises() call
+# ---------------------------------------------------------------------------
+
+
+def test_ltf005_misused_raises(tmp_path: Path) -> None:
+    """assert result == pytest.raises(ValueError) → flagged as LTF005."""
+    findings = _lint(
+        """
+        import pytest
+
+        def test_foo():
+            assert result == pytest.raises(ValueError)
+        """,
+        tmp_path,
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "LTF005"
+    assert findings[0].test_name == "test_foo"
+
+
+def test_ltf005_mixed_valid_and_misused(tmp_path: Path) -> None:
+    """Strong assert + misused raises → LTF005 found, no LTF001-004 (independent passes)."""
+    findings = _lint(
+        """
+        import pytest
+
+        def test_foo():
+            assert 1 + 1 == 2
+            assert result == pytest.raises(ValueError)
+        """,
+        tmp_path,
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "LTF005"
+
+
+def test_ltf005_proper_with_raises_not_flagged(tmp_path: Path) -> None:
+    """`with pytest.raises(...)` context manager is correct usage — NOT flagged."""
+    findings = _lint(
+        """
+        import pytest
+
+        def test_foo():
+            with pytest.raises(ValueError):
+                int("bad")
+        """,
+        tmp_path,
+    )
+    assert findings == []
+
+
+def test_ltf005_bare_raises_name(tmp_path: Path) -> None:
+    """assert x == raises(ValueError) with bare `raises` name → flagged as LTF005."""
+    findings = _lint(
+        """
+        from pytest import raises
+
+        def test_foo():
+            assert result == raises(ValueError)
+        """,
+        tmp_path,
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "LTF005"
+
+
+def test_ltf005_nested_inside_compound_block(tmp_path: Path) -> None:
+    """Misused raises nested inside an `if` block → still flagged by LTF005."""
+    findings = _lint(
+        """
+        import pytest
+
+        def test_foo():
+            if True:
+                assert result == pytest.raises(ValueError)
+        """,
+        tmp_path,
+    )
+    ltf005 = [f for f in findings if f.rule == "LTF005"]
+    assert len(ltf005) == 1
+    assert ltf005[0].test_name == "test_foo"
+
+
+def test_ltf005_non_test_helper_ignored(tmp_path: Path) -> None:
+    """A helper function (no test_ prefix) with a misused raises → NOT flagged."""
+    findings = _lint(
+        """
+        import pytest
+
+        def helper():
+            assert something == pytest.raises(ValueError)
+        """,
+        tmp_path,
+    )
+    assert findings == []
+
+
+def test_ltf005_message_contains_no_test_prefix_word(tmp_path: Path) -> None:
+    """LTF005 message must not contain any word matching \\btest_\\w+."""
+    import re
+
+    findings = _lint(
+        """
+        import pytest
+
+        def test_foo():
+            assert x == pytest.raises(ValueError)
+        """,
+        tmp_path,
+    )
+    assert len(findings) == 1
+    assert not re.search(r"\btest_\w+", findings[0].message)

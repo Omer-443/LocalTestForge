@@ -39,6 +39,7 @@ _MESSAGES: dict[str, str] = {
     "LTF002": "assertion on a constant — always passes regardless of the code under test",
     "LTF003": "assertion only checks type via isinstance() — value is not tested",
     "LTF004": "test has no assertion and no pytest.raises — it can never fail",
+    "LTF005": "assert compares against a raises() call — use `with pytest.raises(...)` as a context manager",
 }
 
 
@@ -64,6 +65,57 @@ def _is_pytest_raises(node: ast.stmt) -> bool:
             ):
                 return True
     return False
+
+
+def _is_raises_call(node: ast.expr) -> bool:
+    """Return True if *node* is a call to ``pytest.raises(...)`` or bare ``raises(...)``.
+
+    Used to detect misuse as a comparison operand (LTF005).
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    # pytest.raises(...)
+    if (
+        isinstance(func, ast.Attribute)
+        and func.attr == "raises"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pytest"
+    ):
+        return True
+    # bare raises(...)
+    return isinstance(func, ast.Name) and func.id == "raises"
+
+
+def _find_ltf005(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    path_str: str,
+    test_name: str,
+) -> list[Finding]:
+    """LTF005: assert whose comparison has a raises() call as an operand.
+
+    Uses ``ast.walk`` so asserts nested inside ``with``/``if``/``for``/``try``
+    blocks are all covered.  One Finding per offending assert.
+    """
+    results: list[Finding] = []
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Assert):
+            continue
+        expr = node.test
+        if not isinstance(expr, ast.Compare):
+            continue
+        operands: list[ast.expr] = [expr.left, *expr.comparators]
+        if any(_is_raises_call(op) for op in operands):
+            results.append(
+                Finding(
+                    path=path_str,
+                    line=node.lineno,
+                    rule="LTF005",
+                    test_name=test_name,
+                    message=_MESSAGES["LTF005"],
+                )
+            )
+    return results
 
 
 def _is_weak_001(test_expr: ast.expr) -> bool:
@@ -206,48 +258,51 @@ def lint_file(path: Path) -> list[Finding]:
     findings: list[Finding] = []
     path_str = str(path)
 
-    # Collect test nodes: module-level functions + methods inside Test* classes
-    test_nodes: list[tuple[str, int, list[ast.stmt]]] = []
+    # Collect test nodes: module-level functions + methods inside Test* classes.
+    # Each tuple carries the func node so LTF005 can walk the full body.
+    FuncNode = ast.FunctionDef | ast.AsyncFunctionDef
+    test_nodes: list[tuple[str, int, list[ast.stmt], FuncNode]] = []
 
     for node in ast.iter_child_nodes(tree):
         if not isinstance(node, ast.stmt):
             continue
         if _is_test_function(node):
             assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            test_nodes.append((node.name, node.lineno, node.body))
+            test_nodes.append((node.name, node.lineno, node.body, node))
         elif isinstance(node, ast.ClassDef):
             for method in _test_methods_from_class(node):
-                test_nodes.append((method.name, method.lineno, method.body))
+                test_nodes.append((method.name, method.lineno, method.body, method))
 
-    for test_name, def_line, body in test_nodes:
+    for test_name, def_line, body, func_node in test_nodes:
         has_strong, first_weak_rule, first_weak_line = _analyse_body(body)
 
-        if has_strong:
-            # At least one strong assertion → test is fine
-            continue
-
-        if first_weak_rule is None:
-            # No assertions at all and no pytest.raises
-            findings.append(
-                Finding(
-                    path=path_str,
-                    line=def_line,
-                    rule="LTF004",
-                    test_name=test_name,
-                    message=_MESSAGES["LTF004"],
+        if not has_strong:
+            if first_weak_rule is None:
+                # No assertions at all and no pytest.raises
+                findings.append(
+                    Finding(
+                        path=path_str,
+                        line=def_line,
+                        rule="LTF004",
+                        test_name=test_name,
+                        message=_MESSAGES["LTF004"],
+                    )
                 )
-            )
-        else:
-            # All assertions are weak
-            assert first_weak_line is not None
-            findings.append(
-                Finding(
-                    path=path_str,
-                    line=first_weak_line,
-                    rule=first_weak_rule,
-                    test_name=test_name,
-                    message=_MESSAGES[first_weak_rule],
+            else:
+                # All assertions are weak
+                assert first_weak_line is not None
+                findings.append(
+                    Finding(
+                        path=path_str,
+                        line=first_weak_line,
+                        rule=first_weak_rule,
+                        test_name=test_name,
+                        message=_MESSAGES[first_weak_rule],
+                    )
                 )
-            )
 
+        # LTF005 is independent: runs regardless of LTF001-004 outcome.
+        findings.extend(_find_ltf005(func_node, path_str, test_name))
+
+    findings.sort(key=lambda f: (f.line, f.rule))
     return findings

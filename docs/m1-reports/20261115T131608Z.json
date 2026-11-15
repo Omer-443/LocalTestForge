@@ -1,0 +1,69 @@
+{
+  "run_id": "20261115T131608Z",
+  "started": "2026-11-15T13:16:08+00:00",
+  "milestone": "01",
+  "prompt_version": "m01-v2",
+  "environment": {
+    "python": "3.11.5",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "pytest": "9.2.0",
+    "pytest-cov": "7.1.0"
+  },
+  "execution_policy": "temp workspace + timeout; NOT a sandbox; trusted synthetic code only",
+  "source": {
+    "path": "C:\\Users\\Omer Faisal\\Desktop\\LocalTestForge\\fixtures\\pricing.py",
+    "sha256": "503c76548c83a779ffd821a4ba2fa351480d71b3e8c9af71ec4e9a6cf0c77226",
+    "functions": [
+      {
+        "name": "apply_discount",
+        "signature": "(price: float, percent: float, is_member: bool=False)",
+        "returns": "float",
+        "has_docstring": true,
+        "raises": [
+          "ValueError"
+        ],
+        "branch_points": 3
+      }
+    ]
+  },
+  "model": {
+    "name": "qwen2.5-coder:1.5b",
+    "digest": "d7372fd828518a4d38b1eb196c673c31a85f2ed302b3d1e406c4c2d1b64a0668",
+    "options": {
+      "temperature": 0,
+      "seed": 42,
+      "num_predict": 1024
+    },
+    "skipped_using_candidate": false
+  },
+  "prompt_sha256": "d3c87ba5af0851998014a03eb3db2e9979b901ba5cb396771315f05177df9410",
+  "repair_attempts": 0,
+  "generation": {
+    "ok": true,
+    "latency_s": 73.05,
+    "eval_count": 1024,
+    "tokens_per_s": 16.49,
+    "response_had_code_fence": false,
+    "candidate_path": "artifacts\\20261115T131608Z\\test_pricing_candidate.py",
+    "candidate_sha256": "d89f1cd47017eaa58eb35b811b7599a8cb538e3ba63d252c8bb8d49f6604613c",
+    "analysis": {
+      "syntax_valid": false,
+      "syntax_error": "invalid syntax (line 1)",
+      "imports_target_module": false,
+      "target_functions_called": [],
+      "test_function_count": 0,
+      "assertion_count": 0,
+      "trivial_assertion_count": 0,
+      "tests_without_assertions": [],
+      "blocking_flags": []
+    }
+  },
+  "execution": {
+    "status": "not_run",
+    "reason": "generation: invalid syntax"
+  },
+  "coverage": null,
+  "mutation": null,
+  "source_unchanged": true,
+  "finished": "2026-11-15T13:17:24+00:00"
+}
