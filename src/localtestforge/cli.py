@@ -50,10 +50,30 @@ def lint(
 def audit(
     src: Annotated[Path, typer.Argument(help="Path to the source file under audit.")],
     tests: Annotated[Path, typer.Argument(help="Path to the test file to audit against.")],
+    out: Annotated[
+        Path,
+        typer.Option("--out", help="Directory where artifacts are written."),
+    ] = Path("artifacts"),
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Timeout in seconds for each test run."),
+    ] = 30.0,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Print diffs for surviving mutants."),
+    ] = False,
 ) -> None:
     """Report line/branch coverage and mutation results with explained survivors."""
-    typer.echo("not implemented yet")
-    raise typer.Exit(2)
+    from localtestforge.audit import run_audit
+
+    exit_code = run_audit(
+        src=src,
+        tests=tests,
+        out_dir=out,
+        timeout=timeout,
+        verbose=verbose,
+    )
+    raise typer.Exit(exit_code)
 
 
 @app.command()
@@ -63,10 +83,105 @@ def generate(
         GenerateMode,
         typer.Option("--mode", help="Generation mode: full or spec."),
     ] = GenerateMode.full,
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Ollama model tag."),
+    ] = "qwen2.5-coder:1.5b",
+    out: Annotated[
+        Path,
+        typer.Option("--out", help="Directory where artifacts are written."),
+    ] = Path("artifacts"),
+    approve: Annotated[
+        bool,
+        typer.Option("--approve", help="Automatically approve running generated tests."),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Timeout in seconds for each test run."),
+    ] = 30.0,
+    num_predict: Annotated[
+        int,
+        typer.Option("--num-predict", help="Maximum tokens to generate per behavior."),
+    ] = 200,
+    temperature: Annotated[
+        float,
+        typer.Option("--temperature", help="Sampling temperature."),
+    ] = 0.0,
+    seed: Annotated[
+        int,
+        typer.Option("--seed", help="Random seed for generation."),
+    ] = 42,
+    repeat_penalty: Annotated[
+        float,
+        typer.Option("--repeat-penalty", help="Penalty for repeating tokens."),
+    ] = 1.1,
 ) -> None:
     """Generate a candidate test file using a local Ollama model, then audit it."""
-    typer.echo("not implemented yet")
-    raise typer.Exit(2)
+    import json
+
+    from localtestforge.audit import format_audit_output
+    from localtestforge.generate import run_generate
+    from localtestforge.ollama import OllamaClient
+
+    if mode == GenerateMode.spec:
+        typer.echo("not implemented yet")
+        raise typer.Exit(2)
+
+    client = OllamaClient(model=model)
+    options = {
+        "num_predict": num_predict,
+        "temperature": temperature,
+        "seed": seed,
+        "repeat_penalty": repeat_penalty,
+    }
+
+    if approve:
+        confirm = lambda _code: True
+    else:
+        confirm = lambda _code: typer.confirm(
+            "Run these generated tests? Trusted code only, no isolation."
+        )
+
+    outcome = run_generate(
+        source=src,
+        client=client,
+        out_dir=out,
+        confirm=confirm,
+        timeout=timeout,
+        options=options,
+    )
+
+    rep = outcome.report
+    gen = rep.get("generation", {})
+    counts = gen.get("counts", {})
+    if counts:
+        counts_str = ", ".join(f"{cnt} {st}" for st, cnt in sorted(counts.items()))
+        typer.echo(f"Behaviors: {counts_str}")
+
+    ex = rep.get("execution", {})
+    tests = ex.get("tests", [])
+    if tests:
+        passed_cnt = ex.get("passed", 0)
+        quar_cnt = ex.get("quarantined", 0)
+        typer.echo(f"Tests: {passed_cnt} passed, {quar_cnt} quarantined")
+        for t in tests:
+            if t.get("outcome") == "quarantined":
+                reason = t.get("reason", "unknown")
+                msg = t.get("message")
+                msg_str = f": {msg}" if msg else ""
+                typer.echo(f"DISAGREEMENT: {t.get('final_name')} ({reason}){msg_str}")
+
+    audit_data = rep.get("audit", {})
+    if "skipped" in audit_data:
+        typer.echo(f"Audit: skipped ({audit_data['skipped']})")
+    elif "report_path" in audit_data:
+        audit_rep_path = Path(audit_data["report_path"])
+        if audit_rep_path.exists():
+            audit_json = json.loads(audit_rep_path.read_text(encoding="utf-8"))
+            src_text = src.read_text(encoding="utf-8") if src.exists() else ""
+            typer.echo(format_audit_output(audit_json, src_text))
+
+    raise typer.Exit(outcome.exit_code)
 
 
 @app.command()

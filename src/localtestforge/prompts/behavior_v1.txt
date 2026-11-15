@@ -1,0 +1,18 @@
+You are writing a pytest test for the module '{module_name}'.
+
+Target function under test:
+```python
+{function_source}
+```
+
+Behavior to test:
+{behavior_description}
+
+Instructions:
+- Write exactly ONE pytest test function for that behavior.
+- Output one python code block and nothing else.
+- Import with `from {module_name} import ...`.
+- Derive the expected value by hand from the code.
+- Assertions must have concrete expected values.
+- Do not use skip, xfail, files, network, or randomness.
+- Never reimplement the code under test.
