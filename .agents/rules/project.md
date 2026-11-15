@@ -1,0 +1,1 @@
+Always read AGENTS.md and SPEC.md in the repository root before starting any task, and follow them.
