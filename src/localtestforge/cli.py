@@ -28,11 +28,22 @@ class GenerateMode(str, enum.Enum):
 
 @app.command()
 def lint(
-    tests: Annotated[Path, typer.Argument(help="Path to the test file or directory to lint.")],
+    tests: Annotated[Path, typer.Argument(help="Path to the test file to lint.")],
 ) -> None:
     """Flag weak assertions in a pytest test file via AST analysis."""
-    typer.echo("not implemented yet")
-    raise typer.Exit(2)
+    from localtestforge.linter import lint_file
+
+    if not tests.exists():
+        typer.echo(f"error: {tests}: file not found", err=True)
+        raise typer.Exit(2)
+    try:
+        findings = lint_file(tests)
+    except SyntaxError as exc:
+        typer.echo(f"error: {tests}: {exc}", err=True)
+        raise typer.Exit(2) from None
+    for finding in findings:
+        typer.echo(str(finding))
+    raise typer.Exit(1 if findings else 0)
 
 
 @app.command()
