@@ -186,6 +186,7 @@ def run_audit(
     out_dir: Path = Path("artifacts"),
     timeout: float = 30.0,
     verbose: bool = False,
+    silent: bool = False,
 ) -> int:
     """Execute test audit: input validation, original test run, coverage and mutation testing.
 
@@ -269,7 +270,8 @@ def run_audit(
         (run_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
         output = format_audit_output(report=report, source_text=src_text, verbose=verbose)
-        typer.echo(output)
+        if not silent:
+            typer.echo(output)
         return 2
 
     # 4. Otherwise run each mutant from generate_mutants() in its own temp dir (no coverage)
@@ -340,5 +342,6 @@ def run_audit(
 
     # 5. Output: terminal summary via typer.echo (plain text)
     output = format_audit_output(report=report, source_text=src_text, verbose=verbose)
-    typer.echo(output)
+    if not silent:
+        typer.echo(output)
     return 0

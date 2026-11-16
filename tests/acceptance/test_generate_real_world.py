@@ -11,8 +11,13 @@ SOURCE = FIXTURES / "pricing.py"
 
 NO_IMPORTS = [
     ("```python\ndef test_plain():\n    assert apply_discount(100, 10) == 90.0\n```", "stop"),
-    ("```python\ndef test_raises():\n    with pytest.raises(ValueError):\n"
-     "        apply_discount(-1, 10)\n```", "stop"),
+    (
+        (
+            "```python\ndef test_raises():\n    with pytest.raises(ValueError):\n"
+            "        apply_discount(-1, 10)\n```"
+        ),
+        "stop",
+    ),
 ]
 MIXED = [
     ("```python\ndef test_wrong():\n    assert apply_discount(100, 10) == 80.0\n```", "stop"),

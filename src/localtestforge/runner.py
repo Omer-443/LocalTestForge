@@ -22,6 +22,7 @@ __all__ = [
     "cleanup_temp_dir",
     "parse_coverage",
     "parse_junit",
+    "parse_junit_failures",
     "run_in_temp_dir",
 ]
 
@@ -36,6 +37,46 @@ class RunResult:
     counts: dict[str, int]
     output_tail: str
     timed_out: bool = False
+    failures: tuple[dict[str, str], ...] = ()
+
+
+def parse_junit_failures(path: Path) -> list[dict[str, str]]:
+    """Parse failure and error elements from junit.xml."""
+    if not path.exists():
+        return []
+    try:
+        root = ET.parse(path).getroot()
+        results: list[dict[str, str]] = []
+        for tc in root.iter("testcase"):
+            tc_name = tc.attrib.get("name", "")
+            for child in tc:
+                if child.tag in ("failure", "error"):
+                    results.append(
+                        {
+                            "testcase": tc_name,
+                            "tag": child.tag,
+                            "type": child.attrib.get("type", ""),
+                            "message": child.attrib.get("message", ""),
+                            "text": child.text or "",
+                        }
+                    )
+        if not results:
+            suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+            for s in suites:
+                for child in s:
+                    if child.tag in ("failure", "error"):
+                        results.append(
+                            {
+                                "testcase": "",
+                                "tag": child.tag,
+                                "type": child.attrib.get("type", ""),
+                                "message": child.attrib.get("message", ""),
+                                "text": child.text or "",
+                            }
+                        )
+        return results
+    except (ET.ParseError, OSError, ValueError):
+        return []
 
 
 def parse_junit(path: Path) -> dict[str, int]:
@@ -281,6 +322,7 @@ def run_in_temp_dir(
 
         duration_s = round(time.perf_counter() - start_time, 2)
         counts = parse_junit(junit_path)
+        failures = tuple(parse_junit_failures(junit_path))
         status = classify_run_status(returncode, counts, timed_out)
 
         combined = (stdout or "") + (stderr or "")
@@ -294,6 +336,7 @@ def run_in_temp_dir(
             counts=counts,
             output_tail=output_tail,
             timed_out=timed_out,
+            failures=failures,
         )
 
         cov_data = parse_coverage(cov_json_path, f"{stem}.py") if with_cov else None

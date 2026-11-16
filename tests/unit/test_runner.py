@@ -11,6 +11,7 @@ from localtestforge.runner import (
     cleanup_temp_dir,
     parse_coverage,
     parse_junit,
+    parse_junit_failures,
     run_in_temp_dir,
 )
 
@@ -88,6 +89,31 @@ def test_parse_junit_valid(tmp_path: Path) -> None:
     assert counts["failures"] == 1
     assert counts["skipped"] == 1
     assert counts["passed"] == 2
+
+
+def test_parse_junit_failures(tmp_path: Path) -> None:
+    assert parse_junit_failures(tmp_path / "missing.xml") == []
+
+    xml_path = tmp_path / "junit.xml"
+    xml_content = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites><testsuite>'
+        '<testcase name="test_f">'
+        '<failure message="assert 1 == 2" type="AssertionError">traceback</failure>'
+        '</testcase>'
+        '<testcase name="test_e">'
+        '<failure message="NameError: name x is not defined">tb2</failure>'
+        '</testcase>'
+        '</testsuite></testsuites>'
+    )
+    xml_path.write_text(xml_content, encoding="utf-8")
+    failures = parse_junit_failures(xml_path)
+    assert len(failures) == 2
+    assert failures[0]["testcase"] == "test_f"
+    assert failures[0]["type"] == "AssertionError"
+    assert failures[0]["message"] == "assert 1 == 2"
+    assert failures[1]["testcase"] == "test_e"
+    assert failures[1]["message"] == "NameError: name x is not defined"
 
 
 def test_parse_coverage_missing_or_empty(tmp_path: Path) -> None:

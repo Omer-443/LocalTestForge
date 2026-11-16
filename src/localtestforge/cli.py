@@ -7,8 +7,9 @@ All are placeholders; real logic is not yet implemented.
 from __future__ import annotations
 
 import enum
+import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -24,6 +25,65 @@ class GenerateMode(str, enum.Enum):
 
     full = "full"
     spec = "spec"
+
+
+def format_quarantine_block(test: dict[str, Any]) -> str:
+    """Format a single quarantined test record into terminal lines.
+
+    Returns a string with the header line and up to two indented evidence lines
+    taken from pytest 'E' lines in the recorded message.  The trailing
+    'test_single.py:N: ExceptionType' fragment is not included.
+
+    Example output::
+
+        DISAGREEMENT test_b001_apply_discount_normal_execution
+          assert 35.0 == 37.5
+          where 35.0 = apply_discount(50.0, 30.0)
+    """
+    reason = test.get("reason", "unknown")
+    final_name = test.get("final_name", "")
+
+    if reason == "test_failed":
+        header = f"DISAGREEMENT {final_name}"
+    elif reason == "test_error":
+        err_type = test.get("error_type", "Error")
+        header = f"BROKEN TEST ({err_type}) {final_name}"
+    else:
+        header = f"QUARANTINED ({reason}) {final_name}"
+
+    # Extract up to two evidence lines from 'E' lines in the message.
+    # The message may be newline-separated (clean) or space-joined by classify_quarantine_reason.
+    # Try line-by-line first; fall back to splitting on 'E ' tokens.
+    msg = test.get("message") or ""
+    evidence_lines: list[str] = []
+
+    _e_line_re = re.compile(r"^E\s+\S")
+
+    # Attempt 1: message has real newlines (clean test data or stored raw output)
+    for raw_line in msg.splitlines():
+        if _e_line_re.match(raw_line):
+            content = raw_line.lstrip("E").strip()
+            if re.match(r"\S+\.py:\d+", content):
+                continue
+            if content:
+                evidence_lines.append(f"  {content}")
+        if len(evidence_lines) >= 2:
+            break
+
+    # Attempt 2: space-joined fallback (classify_quarantine_reason format)
+    if not evidence_lines:
+        for chunk in re.split(r"(?<=\S)\s+(?=E\s)", msg):
+            if _e_line_re.match(chunk):
+                content = chunk.lstrip("E").strip()
+                if re.match(r"\S+\.py:\d+", content):
+                    continue
+                if content:
+                    evidence_lines.append(f"  {content}")
+            if len(evidence_lines) >= 2:
+                break
+
+    parts = [header] + evidence_lines
+    return "\n".join(parts)
 
 
 @app.command()
@@ -163,13 +223,18 @@ def generate(
     if tests:
         passed_cnt = ex.get("passed", 0)
         quar_cnt = ex.get("quarantined", 0)
-        typer.echo(f"Tests: {passed_cnt} passed, {quar_cnt} quarantined")
+        q_reasons = ex.get("quarantine_reasons", {})
+        failed_cnt = q_reasons.get("test_failed", 0)
+        broken_cnt = q_reasons.get("test_error", 0)
+
+        parts = [f"{failed_cnt} disagreements", f"{broken_cnt} broken"]
+        for r, c in sorted(q_reasons.items()):
+            if r not in ("test_failed", "test_error"):
+                parts.append(f"{c} {r}")
+        typer.echo(f"Tests: {passed_cnt} passed, {quar_cnt} quarantined ({', '.join(parts)})")
         for t in tests:
             if t.get("outcome") == "quarantined":
-                reason = t.get("reason", "unknown")
-                msg = t.get("message")
-                msg_str = f": {msg}" if msg else ""
-                typer.echo(f"DISAGREEMENT: {t.get('final_name')} ({reason}){msg_str}")
+                typer.echo(format_quarantine_block(t))
 
     audit_data = rep.get("audit", {})
     if "skipped" in audit_data:
