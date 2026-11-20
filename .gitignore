@@ -8,3 +8,18 @@ __pycache__/
 coverage.json
 junit.xml
 artifacts/
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Local environment and secret files
+.env
+.env.*
+!.env.example

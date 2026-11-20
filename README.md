@@ -35,16 +35,37 @@ LTF005 exists because a small model produced this pattern in 2 of 4 early sample
 
 ```
 $ ltf audit fixtures/pricing.py fixtures/tests_weak.py
+Note: audit runs test code without isolation. Trusted code only.
 Original run: passed
 Coverage: 81.8% lines, 66.7% branches
 Mutants killed: 9/25 (36%), 16 survived
+Surviving mutants (16), grouped by source line:
+line 3: MAX_DISCOUNT = 50
+  M001 constant_boundary: 50 -> 49
+    likely gap: no test pins this constant's exact value
+  M002 constant_boundary: 50 -> 51
+    likely gap: no test pins this constant's exact value
 line 15: if price < 0:
   M005 comparison_flip: price < 0 -> price <= 0
     likely gap: no test sits exactly on this boundary
+line 17: if not 0 <= percent <= 100:
+  M008 comparison_flip: 0 <= percent <= 100 -> 0 < percent <= 100
+    likely gap: no test sits exactly on this boundary
+line 21: effective += MEMBER_BONUS
+  M015 arithmetic_swap: effective += MEMBER_BONUS -> effective -= MEMBER_BONUS
+    likely gap: no test depends on this calculation
+line 22: return round(price * (1 - effective / 100), 2)
+  M024 constant_boundary: 2 -> 1
+    likely gap: no test pins this constant's exact value
 ...
-```
 
-[screenshot: audit output on the weak vs strong suite]
+$ ltf audit fixtures/pricing.py fixtures/tests_strong.py
+Note: audit runs test code without isolation. Trusted code only.
+Original run: passed
+Coverage: 100.0% lines, 100.0% branches
+Mutants killed: 25/25 (100%)
+All 25 mutants killed.
+```
 
 ## Quickstart (Windows PowerShell)
 
@@ -87,18 +108,18 @@ There is no auto-repair: the tool never weakens an assertion to make a test pass
 Single deterministic runs on one function (`pricing.py`, 25 mutants), temperature 0. Coverage
 and mutation are computed on the tests that actually passed.
 
-| Suite | Usable tests | Line / branch cov. | Mutants killed |
-|---|---|---|---|
-| Qwen2.5-Coder 1.5B, whole-file generation | 2 of 5 | 63.6% / 50.0% | 2/25 (8%) |
-| Qwen2.5-Coder 1.5B, per-behavior | 4 of 7 | 90.9% / 83.3% | 9/25 (36%) |
-| Qwen2.5-Coder 3B, per-behavior | 4 of 6 | 90.9% / 83.3% | 10/25 (40%) |
-| Hand-written weak suite | 6 | 81.8% / 66.7% | 9/25 (36%) |
-| Hand-written strong suite | 12 | 100% / 100% | 25/25 (100%) |
-
-[add rows after the constant-import fix, and latency and memory per model]
+| Suite | Usable tests | Line / branch cov. | Mutants killed | Latency / throughput | Size |
+|---|---|---|---|---|---|
+| Qwen2.5-Coder 1.5B, whole-file generation | 2 of 5 | 63.6% / 50.0% | 2/25 (8%) | ~14s | 986 MB |
+| Qwen2.5-Coder 1.5B, per-behavior (initial) | 4 of 7 | 90.9% / 83.3% | 9/25 (36%) | ~17s/beh (~120s total, ~12 t/s) | 986 MB |
+| Qwen2.5-Coder 3B, per-behavior (initial) | 4 of 6 | 90.9% / 83.3% | 10/25 (40%) | ~18s/beh (~110s total, ~13 t/s) | 1.9 GB |
+| Qwen2.5-Coder 3B, per-behavior (post-constant import) | 6 of 6 | 100.0% / 100.0% | 11/25 (44%) | ~15s/beh (~90s total, ~13 t/s) | 1.9 GB |
+| Hand-written weak suite | 6 | 81.8% / 66.7% | 9/25 (36%) | Instant (<1s) | N/A |
+| Hand-written strong suite | 12 | 100% / 100% | 25/25 (100%) | Instant (<1s) | N/A |
 
 Observations (n=1 per row, so treat them as observations, not benchmarks):
 
+- **Importing module constants improved usable tests.** Following the constant-import header fix (`87e915b`), Qwen2.5-Coder 3B generated tests referencing module constants without `NameError`, passing 6 of 6 tests, reaching 100% line/branch coverage, and killing 11/25 mutants (44%).
 - **Coverage misled.** The 1.5B whole-file run reported 100% line and branch coverage while 3
   of its 5 tests were wrong. Computed from the 2 passing tests it was 63.6% and 50.0%.
 - **The model is good at structure and weak at expected values.** Exception tests were
