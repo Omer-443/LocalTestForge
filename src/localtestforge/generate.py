@@ -20,7 +20,11 @@ from localtestforge.audit import (
     get_environment_info,
     run_audit,
 )
-from localtestforge.behaviors import enumerate_behaviors
+from localtestforge.behaviors import (
+    enumerate_behaviors,
+    enumerate_spec_behaviors,
+    render_function_spec,
+)
 from localtestforge.checks import check_candidate
 from localtestforge.linter import _find_ltf005, lint_file
 from localtestforge.runner import RunResult, run_in_temp_dir
@@ -31,6 +35,8 @@ __all__ = [
     "build_deterministic_header",
     "classify_quarantine_reason",
     "extract_code",
+    "extract_header_names",
+    "render_function_spec",
     "run_generate",
 ]
 
@@ -63,10 +69,15 @@ def extract_code(text: str) -> str:
     return text.strip()
 
 
-def build_deterministic_header(tree: ast.AST, module_stem: str) -> list[str]:
-    """Build deterministic header imports for candidate files."""
-    header = ["import pytest"]
+def extract_header_names(tree: ast.AST) -> tuple[list[str], list[str]]:
+    """Extract public top-level functions and module-level constants.
+
+    Constants are module top-level assignments (ast.Assign with a single Name target,
+    or ast.AnnAssign with a Name target) that do not start with an underscore and
+    are UPPER_CASE.
+    """
     public_funcs: list[str] = []
+    constants: set[str] = set()
     body = getattr(tree, "body", [])
     for node in body:
         if (
@@ -75,9 +86,47 @@ def build_deterministic_header(tree: ast.AST, module_stem: str) -> list[str]:
             and node.name not in public_funcs
         ):
             public_funcs.append(node.name)
+        elif isinstance(node, ast.Assign):
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if not name.startswith("_") and name.isupper():
+                    constants.add(name)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+            if not name.startswith("_") and name.isupper():
+                constants.add(name)
+    return public_funcs, sorted(constants)
+
+
+def build_deterministic_header(tree: ast.AST, module_stem: str) -> list[str]:
+    """Build deterministic header imports for candidate files."""
+    header = ["import pytest"]
+    public_funcs, sorted_constants = extract_header_names(tree)
     if public_funcs:
         header.append(f"from {module_stem} import {', '.join(public_funcs)}")
+    if sorted_constants:
+        header.append(f"from {module_stem} import {', '.join(sorted_constants)}")
     return header
+
+
+def _trim_to_whole_lines(text_or_lines: str | list[str], limit: int = 300) -> str:
+    """Preserve newlines, trimming whole lines so total length <= limit, never mid-line."""
+    raw_lines = text_or_lines.splitlines() if isinstance(text_or_lines, str) else text_or_lines
+    kept: list[str] = []
+    current_len = 0
+    for line in raw_lines:
+        line_len = len(line)
+        needed = line_len if not kept else line_len + 1
+        if current_len + needed <= limit:
+            kept.append(line)
+            current_len += needed
+        else:
+            break
+
+    if not kept and raw_lines:
+        return raw_lines[0]
+
+    return "\n".join(kept)
 
 
 def classify_quarantine_reason(
@@ -88,7 +137,7 @@ def classify_quarantine_reason(
         return "timeout", None, "test execution timed out"
 
     if run_res.status in ("collection_error", "harness_error"):
-        msg = (run_res.output_tail or "pytest collection/harness error")[:300]
+        msg = _trim_to_whole_lines(run_res.output_tail or "pytest collection/harness error", 300)
         return "error", None, msg
 
     failure = run_res.failures[0] if run_res.failures else None
@@ -97,18 +146,22 @@ def classify_quarantine_reason(
     if failure and failure.get("tag") == "error":
         msg_raw = failure.get("message", "")
         if "collection failure" in msg_raw.lower() or run_res.counts.get("tests", 0) == 0:
-            return "error", None, (msg_raw or run_res.output_tail or "pytest collection error")[:300]
+            return "error", None, _trim_to_whole_lines(
+                msg_raw or run_res.output_tail or "pytest collection error", 300
+            )
 
     # If no failure element was parsed from junit
     if not failure:
         if run_res.counts.get("tests", 0) == 0:
-            return "error", None, (run_res.output_tail or "pytest collection/infrastructure error")[:300]
+            return "error", None, _trim_to_whole_lines(
+                run_res.output_tail or "pytest collection/infrastructure error", 300
+            )
         lines = [
             line.strip()
             for line in run_res.output_tail.splitlines()
-            if line.strip().startswith("E   ") or "AssertionError" in line
+            if re.match(r"^E(\s+|$)", line.strip()) or "AssertionError" in line
         ]
-        msg = (" ".join(lines) if lines else run_res.output_tail)[:300]
+        msg = _trim_to_whole_lines(lines if lines else run_res.output_tail, 300)
         return "test_failed", None, msg
 
     # Determine the type from the junit failure/error element (type attribute or message)
@@ -142,27 +195,33 @@ def classify_quarantine_reason(
         lines = [
             line.strip()
             for line in run_res.output_tail.splitlines()
-            if line.strip().startswith("E   ") or "AssertionError" in line
+            if re.match(r"^E(\s+|$)", line.strip()) or "AssertionError" in line
         ]
-        msg = (" ".join(lines) if lines else (msg_attr or run_res.output_tail))[:300]
+        msg = _trim_to_whole_lines(lines if lines else (msg_attr or run_res.output_tail), 300)
     else:
         reason = "test_error"
         error_type = exc_type or "Error"
         lines = [
             line.strip()
             for line in run_res.output_tail.splitlines()
-            if line.strip().startswith("E   ")
+            if re.match(r"^E(\s+|$)", line.strip())
         ]
-        msg = (" ".join(lines) if lines else (msg_attr or run_res.output_tail))[:300]
+        msg = _trim_to_whole_lines(lines if lines else (msg_attr or run_res.output_tail), 300)
 
     return reason, error_type, msg
 
 
-def _get_prompt_template() -> tuple[str, str, str]:
+def _get_prompt_template(mode: str = "full") -> tuple[str, str, str]:
     """Return (template_name, version, template_text)."""
-    template_name = "behavior_v2.txt"
-    version = "behavior_v2"
-    prompt_path = Path(__file__).resolve().parent / "prompts" / template_name
+    if mode == "spec":
+        template_name = "spec_v1"
+        version = "spec_v1"
+        file_name = "spec_v1.txt"
+    else:
+        template_name = "behavior_v2.txt"
+        version = "behavior_v2"
+        file_name = "behavior_v2.txt"
+    prompt_path = Path(__file__).resolve().parent / "prompts" / file_name
     template_text = prompt_path.read_text(encoding="utf-8")
     return template_name, version, template_text
 
@@ -175,18 +234,22 @@ def run_generate(
     confirm: Callable[[str], bool],
     timeout: float = 30.0,
     options: dict[str, Any] | None = None,
+    mode: str = "full",
 ) -> GenerateOutcome:
     """Generate candidate tests for source, assemble, filter, evaluate, and audit."""
+    if mode not in ("full", "spec"):
+        raise ValueError(f"Unknown mode: {mode}")
+
     if not source.exists() or not source.is_file():
         typer.echo(f"error: {source}: file not found", err=True)
-        return GenerateOutcome(exit_code=2, run_dir=out_dir, report={"error": f"{source}: file not found"})
+        return GenerateOutcome(exit_code=2, run_dir=out_dir, report={"error": f"{source}: file not found", "mode": mode})
 
     try:
         source_text = source.read_text(encoding="utf-8")
         tree = ast.parse(source_text, filename=str(source))
     except (SyntaxError, UnicodeDecodeError) as exc:
         typer.echo(f"error: {source}: {exc}", err=True)
-        return GenerateOutcome(exit_code=2, run_dir=out_dir, report={"error": str(exc)})
+        return GenerateOutcome(exit_code=2, run_dir=out_dir, report={"error": str(exc), "mode": mode})
 
     merged_options = dict(DEFAULT_OPTIONS)
     if options:
@@ -196,14 +259,19 @@ def run_generate(
     src_hash_before = compute_lf_sha256(source_text)
     env_info = get_environment_info()
 
-    template_name, template_version, template_text = _get_prompt_template()
+    template_name, template_version, template_text = _get_prompt_template(mode)
     prompt_sha256 = hashlib.sha256(template_text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
 
     run_id, run_dir = create_unique_run_dir(out_dir)
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    behaviors = enumerate_behaviors(tree)
+    spec_warnings: list[str] = []
+    if mode == "spec":
+        behaviors = enumerate_spec_behaviors(tree, warnings=spec_warnings)
+    else:
+        behaviors = enumerate_behaviors(tree)
+
     func_nodes: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {
         node.name: node
         for node in tree.body
@@ -213,17 +281,64 @@ def run_generate(
     behavior_records: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
     accepted_test_nodes: list[tuple[str, str, str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    public_funcs, sorted_constants = extract_header_names(tree)
+    header_names: list[str] = list(public_funcs)
+    for c in sorted_constants:
+        if c not in header_names:
+            header_names.append(c)
     header_imports = build_deterministic_header(tree, source.stem)
     deduped_imports: list[str] = list(header_imports)
+
+    def _build_generation_dict(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "behaviors": behavior_records,
+            "counts": status_counts,
+            "header_names": header_names,
+        }
+        if mode == "spec":
+            d["spec_warnings"] = spec_warnings
+        if extra:
+            d.update(extra)
+        return d
+
+    def _build_execution_dict(
+        status: str,
+        tests_gen: int,
+        passed: int,
+        quarantined: int,
+        quar_reasons: dict[str, int],
+        tests: list[dict[str, Any]],
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        disagreements = [
+            t["final_name"]
+            for t in tests
+            if t.get("reason") == "test_failed"
+        ]
+        d: dict[str, Any] = {
+            "status": status,
+            "tests_generated": tests_gen,
+            "passed": passed,
+            "quarantined": quarantined,
+            "quarantine_reasons": quar_reasons,
+            "disagreements": disagreements,
+            "tests": tests,
+        }
+        if reason:
+            d["reason"] = reason
+        return d
 
     # a. Prompt -> client.generate per behavior
     for b in behaviors:
         func_node = func_nodes.get(b.function_name)
-        func_source = (
-            ast.get_source_segment(source_text, func_node)
-            if func_node is not None
-            else ""
-        ) or (ast.unparse(func_node) if func_node is not None else "")
+        if mode == "spec":
+            func_source = render_function_spec(func_node) if func_node is not None else ""
+        else:
+            func_source = (
+                ast.get_source_segment(source_text, func_node)
+                if func_node is not None
+                else ""
+            ) or (ast.unparse(func_node) if func_node is not None else "")
 
         prompt = template_text.format(
             module_name=source.stem,
@@ -238,6 +353,7 @@ def run_generate(
             src_hash_after = compute_lf_sha256(source.read_text(encoding="utf-8"))
             report = {
                 "run_id": run_id,
+                "mode": mode,
                 "started": started_iso,
                 "finished": finished_iso,
                 "environment": env_info,
@@ -245,19 +361,15 @@ def run_generate(
                 "source": {"path": str(source), "sha256": src_hash_before},
                 "model": {"name": getattr(client, "model", ""), "digest": getattr(client, "digest", None), "options": merged_options},
                 "prompt": {"template": template_name, "version": template_version, "sha256": prompt_sha256},
-                "generation": {
-                    "behaviors": behavior_records,
-                    "counts": status_counts,
-                    "error": str(exc),
-                },
-                "execution": {
-                    "status": "not_run",
-                    "tests_generated": 0,
-                    "passed": 0,
-                    "quarantined": 0,
-                    "quarantine_reasons": {},
-                    "tests": [],
-                },
+                "generation": _build_generation_dict({"error": str(exc)}),
+                "execution": _build_execution_dict(
+                    status="not_run",
+                    tests_gen=0,
+                    passed=0,
+                    quarantined=0,
+                    quar_reasons={},
+                    tests=[],
+                ),
                 "audit": {"skipped": f"generation failed: {exc}"},
                 "lint_warnings": [],
                 "repair_attempts": 0,
@@ -339,6 +451,7 @@ def run_generate(
         src_hash_after = compute_lf_sha256(source.read_text(encoding="utf-8"))
         report = {
             "run_id": run_id,
+            "mode": mode,
             "started": started_iso,
             "finished": finished_iso,
             "environment": env_info,
@@ -346,18 +459,15 @@ def run_generate(
             "source": {"path": str(source), "sha256": src_hash_before},
             "model": {"name": getattr(client, "model", ""), "digest": getattr(client, "digest", None), "options": merged_options},
             "prompt": {"template": template_name, "version": template_version, "sha256": prompt_sha256},
-            "generation": {
-                "behaviors": behavior_records,
-                "counts": status_counts,
-            },
-            "execution": {
-                "status": "completed",
-                "tests_generated": 0,
-                "passed": 0,
-                "quarantined": 0,
-                "quarantine_reasons": {},
-                "tests": [],
-            },
+            "generation": _build_generation_dict(),
+            "execution": _build_execution_dict(
+                status="completed",
+                tests_gen=0,
+                passed=0,
+                quarantined=0,
+                quar_reasons={},
+                tests=[],
+            ),
             "audit": {"skipped": "no passing tests"},
             "lint_warnings": [],
             "repair_attempts": 0,
@@ -373,6 +483,7 @@ def run_generate(
         src_hash_after = compute_lf_sha256(source.read_text(encoding="utf-8"))
         report = {
             "run_id": run_id,
+            "mode": mode,
             "started": started_iso,
             "finished": finished_iso,
             "environment": env_info,
@@ -380,19 +491,16 @@ def run_generate(
             "source": {"path": str(source), "sha256": src_hash_before},
             "model": {"name": getattr(client, "model", ""), "digest": getattr(client, "digest", None), "options": merged_options},
             "prompt": {"template": template_name, "version": template_version, "sha256": prompt_sha256},
-            "generation": {
-                "behaviors": behavior_records,
-                "counts": status_counts,
-            },
-            "execution": {
-                "status": "not_run",
-                "reason": "human declined",
-                "tests_generated": len(accepted_test_nodes),
-                "passed": 0,
-                "quarantined": 0,
-                "quarantine_reasons": {},
-                "tests": [],
-            },
+            "generation": _build_generation_dict(),
+            "execution": _build_execution_dict(
+                status="not_run",
+                tests_gen=len(accepted_test_nodes),
+                passed=0,
+                quarantined=0,
+                quar_reasons={},
+                tests=[],
+                reason="human declined",
+            ),
             "audit": {"skipped": "human declined"},
             "lint_warnings": [],
             "repair_attempts": 0,
@@ -423,7 +531,7 @@ def run_generate(
                     "behavior_id": b_id,
                     "outcome": "quarantined",
                     "reason": reason,
-                    "message": ltf005_findings[0].message[:300],
+                    "message": _trim_to_whole_lines(ltf005_findings[0].message, 300),
                 }
             )
             continue
@@ -476,6 +584,7 @@ def run_generate(
         src_hash_after = compute_lf_sha256(source.read_text(encoding="utf-8"))
         report = {
             "run_id": run_id,
+            "mode": mode,
             "started": started_iso,
             "finished": finished_iso,
             "environment": env_info,
@@ -483,18 +592,15 @@ def run_generate(
             "source": {"path": str(source), "sha256": src_hash_before},
             "model": {"name": getattr(client, "model", ""), "digest": getattr(client, "digest", None), "options": merged_options},
             "prompt": {"template": template_name, "version": template_version, "sha256": prompt_sha256},
-            "generation": {
-                "behaviors": behavior_records,
-                "counts": status_counts,
-            },
-            "execution": {
-                "status": "completed",
-                "tests_generated": len(accepted_test_nodes),
-                "passed": 0,
-                "quarantined": quarantined_count,
-                "quarantine_reasons": quarantine_reasons,
-                "tests": test_eval_records,
-            },
+            "generation": _build_generation_dict(),
+            "execution": _build_execution_dict(
+                status="completed",
+                tests_gen=len(accepted_test_nodes),
+                passed=0,
+                quarantined=quarantined_count,
+                quar_reasons=quarantine_reasons,
+                tests=test_eval_records,
+            ),
             "audit": {"skipped": "no passing tests"},
             "lint_warnings": [],
             "repair_attempts": 0,
@@ -555,6 +661,7 @@ def run_generate(
 
     report = {
         "run_id": run_id,
+        "mode": mode,
         "started": started_iso,
         "finished": finished_iso,
         "environment": env_info,
@@ -562,18 +669,15 @@ def run_generate(
         "source": {"path": str(source), "sha256": src_hash_before},
         "model": {"name": getattr(client, "model", ""), "digest": getattr(client, "digest", None), "options": merged_options},
         "prompt": {"template": template_name, "version": template_version, "sha256": prompt_sha256},
-        "generation": {
-            "behaviors": behavior_records,
-            "counts": status_counts,
-        },
-        "execution": {
-            "status": "completed",
-            "tests_generated": len(accepted_test_nodes),
-            "passed": passed_count,
-            "quarantined": quarantined_count,
-            "quarantine_reasons": quarantine_reasons,
-            "tests": test_eval_records,
-        },
+        "generation": _build_generation_dict(),
+        "execution": _build_execution_dict(
+            status="completed",
+            tests_gen=len(accepted_test_nodes),
+            passed=passed_count,
+            quarantined=quarantined_count,
+            quar_reasons=quarantine_reasons,
+            tests=test_eval_records,
+        ),
         "audit": audit_summary,
         "lint_warnings": lint_warnings,
         "repair_attempts": 0,

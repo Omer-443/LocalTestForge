@@ -6,9 +6,11 @@ import ast
 from pathlib import Path
 
 from localtestforge.generate import (
+    _trim_to_whole_lines,
     build_deterministic_header,
     classify_quarantine_reason,
     extract_code,
+    extract_header_names,
     run_generate,
 )
 from localtestforge.ollama import GenerationResult
@@ -125,6 +127,77 @@ def public_one(again): return again
     assert build_deterministic_header(empty_tree, "empty") == ["import pytest"]
 
 
+def test_build_deterministic_header_constants() -> None:
+    code = """
+_PRIVATE_CONST = 100
+low_case = 200
+CamelCase = 300
+BETA = 2
+ALPHA = 1
+GAMMA: int = 3
+DELTA: str
+ALPHA = 99
+X = Y = 400
+A, B = 500, 600
+
+def get_data(): return 1
+def _secret(): return 2
+def process_data(): return 3
+"""
+    tree = ast.parse(code)
+    header = build_deterministic_header(tree, "mymod")
+    assert header == [
+        "import pytest",
+        "from mymod import get_data, process_data",
+        "from mymod import ALPHA, BETA, DELTA, GAMMA",
+    ]
+
+
+def test_build_deterministic_header_no_constants_means_no_extra_line() -> None:
+    code = """
+def func_a(): pass
+def func_b(): pass
+_SECRET = 42
+lowercase_var = 10
+"""
+    tree = ast.parse(code)
+    header = build_deterministic_header(tree, "mymod")
+    # Function line unchanged, no constants line emitted
+    assert header == [
+        "import pytest",
+        "from mymod import func_a, func_b",
+    ]
+
+
+def test_build_deterministic_header_only_constants() -> None:
+    code = """
+CONST_B = 2
+CONST_A: int = 1
+"""
+    tree = ast.parse(code)
+    header = build_deterministic_header(tree, "mymod")
+    assert header == [
+        "import pytest",
+        "from mymod import CONST_A, CONST_B",
+    ]
+
+
+def test_extract_header_names() -> None:
+    code = """
+FIRST = 10
+_SECOND = 20
+third = 30
+FOURTH: int = 40
+
+def my_func(): pass
+def _priv_func(): pass
+"""
+    tree = ast.parse(code)
+    funcs, consts = extract_header_names(tree)
+    assert funcs == ["my_func"]
+    assert consts == ["FIRST", "FOURTH"]
+
+
 def test_classify_quarantine_reason() -> None:
     # Timeout
     res_timeout = RunResult(
@@ -190,11 +263,65 @@ def test_classify_quarantine_reason() -> None:
     assert reason == "test_error"
     assert err_type == "TypeError"
 
+    # Multi-line AssertionError preserving newlines
+    res_multiline = RunResult(
+        status="test_failures",
+        returncode=1,
+        duration_s=0.1,
+        counts={"tests": 1, "failures": 1},
+        output_tail=(
+            "E   assert 70.0 == 60.0\n"
+            "E        +  where 70.0 = apply_discount(100.0, 30.0)\n"
+            "test_single.py:7: AssertionError"
+        ),
+        failures=({"tag": "failure", "type": "AssertionError", "message": "assert 70.0 == 60.0", "text": ""},),
+    )
+    reason, err_type, msg = classify_quarantine_reason(res_multiline)
+    assert reason == "test_failed"
+    assert err_type is None
+    assert "\n" in msg
+    assert "where 70.0 = apply_discount" in msg
+
+
+def test_trim_to_whole_lines_preserves_newlines_and_never_cuts_mid_line() -> None:
+    lines = ["a" * 100, "b" * 150, "c" * 100]
+    trimmed = _trim_to_whole_lines(lines, 300)
+    assert trimmed == "a" * 100 + "\n" + "b" * 150
+    assert len(trimmed) == 251
+
+    # First line exceeds limit: returned whole without mid-line cut
+    single_long = ["x" * 350, "y" * 10]
+    assert _trim_to_whole_lines(single_long, 300) == "x" * 350
+
 
 def test_prompt_version_is_behavior_v2(tmp_path: Path) -> None:
     code = "```python\ndef test_ok(): assert apply_discount(100, 10) == 90.0\n```"
     client = DummyClient(code)
     outcome = run_generate(SOURCE, client, tmp_path, confirm=lambda _code: False)
+    assert outcome.report["mode"] == "full"
     assert outcome.report["prompt"]["version"] == "behavior_v2"
     assert outcome.report["prompt"]["template"] == "behavior_v2.txt"
     assert "quarantine_reasons" in outcome.report["execution"]
+    assert "disagreements" in outcome.report["execution"]
+    assert outcome.report["generation"]["header_names"] == [
+        "apply_discount",
+        "MAX_DISCOUNT",
+        "MEMBER_BONUS",
+    ]
+
+
+def test_spec_mode_report_metadata(tmp_path: Path) -> None:
+    code = "```python\ndef test_ok(): assert apply_discount(100, 10) == 90.0\n```"
+    client = DummyClient(code)
+    outcome = run_generate(SOURCE, client, tmp_path, confirm=lambda _code: False, mode="spec")
+    assert outcome.report["mode"] == "spec"
+    assert outcome.report["prompt"]["version"] == "spec_v1"
+    assert outcome.report["prompt"]["template"] == "spec_v1"
+    assert "spec_warnings" in outcome.report["generation"]
+    assert "disagreements" in outcome.report["execution"]
+    assert outcome.report["generation"]["header_names"] == [
+        "apply_discount",
+        "MAX_DISCOUNT",
+        "MEMBER_BONUS",
+    ]
+

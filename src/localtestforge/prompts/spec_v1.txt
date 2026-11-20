@@ -1,0 +1,15 @@
+You are writing a pytest test for the module '{module_name}'.
+
+Function specification:
+```python
+{function_source}
+```
+
+Behavior to test:
+{behavior_description}
+
+Instructions:
+- Write exactly ONE pytest test function derived from the specification alone, with expected values derived from the documented behavior rather than guessed from an implementation.
+- Output one python code block and nothing else.
+- Do not write import statements (imports are added automatically).
+- Do not use skip, xfail, files, network, or randomness.

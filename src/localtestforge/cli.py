@@ -27,7 +27,7 @@ class GenerateMode(str, enum.Enum):
     spec = "spec"
 
 
-def format_quarantine_block(test: dict[str, Any]) -> str:
+def format_quarantine_block(test: dict[str, Any], mode: str = "full") -> str:
     """Format a single quarantined test record into terminal lines.
 
     Returns a string with the header line and up to two indented evidence lines
@@ -44,41 +44,34 @@ def format_quarantine_block(test: dict[str, Any]) -> str:
     final_name = test.get("final_name", "")
 
     if reason == "test_failed":
-        header = f"DISAGREEMENT {final_name}"
+        if mode == "spec":
+            header = f"DISAGREEMENT (spec vs implementation) {final_name}"
+        else:
+            header = f"DISAGREEMENT {final_name}"
     elif reason == "test_error":
         err_type = test.get("error_type", "Error")
         header = f"BROKEN TEST ({err_type}) {final_name}"
     else:
         header = f"QUARANTINED ({reason}) {final_name}"
 
-    # Extract up to two evidence lines from 'E' lines in the message.
-    # The message may be newline-separated (clean) or space-joined by classify_quarantine_reason.
-    # Try line-by-line first; fall back to splitting on 'E ' tokens.
     msg = test.get("message") or ""
     evidence_lines: list[str] = []
 
-    _e_line_re = re.compile(r"^E\s+\S")
+    if msg:
+        if "\n" in msg:
+            raw_chunks = msg.splitlines()
+        else:
+            raw_chunks = re.split(r"(?<=\S)\s+(?=E\s)", msg)
 
-    # Attempt 1: message has real newlines (clean test data or stored raw output)
-    for raw_line in msg.splitlines():
-        if _e_line_re.match(raw_line):
-            content = raw_line.lstrip("E").strip()
-            if re.match(r"\S+\.py:\d+", content):
+        for chunk in raw_chunks:
+            if re.match(r"^\S+\.py:\d+", chunk.strip()):
                 continue
+            cleaned = re.sub(r"\s*\b\S+\.py:\d+(?::\s*\w+)?", "", chunk).strip()
+            if not cleaned:
+                continue
+            content = re.sub(r"^E(\s+|$)", "", cleaned).strip()
             if content:
                 evidence_lines.append(f"  {content}")
-        if len(evidence_lines) >= 2:
-            break
-
-    # Attempt 2: space-joined fallback (classify_quarantine_reason format)
-    if not evidence_lines:
-        for chunk in re.split(r"(?<=\S)\s+(?=E\s)", msg):
-            if _e_line_re.match(chunk):
-                content = chunk.lstrip("E").strip()
-                if re.match(r"\S+\.py:\d+", content):
-                    continue
-                if content:
-                    evidence_lines.append(f"  {content}")
             if len(evidence_lines) >= 2:
                 break
 
@@ -183,10 +176,6 @@ def generate(
     from localtestforge.generate import run_generate
     from localtestforge.ollama import OllamaClient
 
-    if mode == GenerateMode.spec:
-        typer.echo("not implemented yet")
-        raise typer.Exit(2)
-
     client = OllamaClient(model=model)
     options = {
         "num_predict": num_predict,
@@ -209,6 +198,7 @@ def generate(
         confirm=confirm,
         timeout=timeout,
         options=options,
+        mode=mode.value,
     )
 
     rep = outcome.report
@@ -234,7 +224,11 @@ def generate(
         typer.echo(f"Tests: {passed_cnt} passed, {quar_cnt} quarantined ({', '.join(parts)})")
         for t in tests:
             if t.get("outcome") == "quarantined":
-                typer.echo(format_quarantine_block(t))
+                typer.echo(format_quarantine_block(t, mode=mode.value))
+        if failed_cnt > 0:
+            typer.echo(
+                "A disagreement may be a bug, an outdated docstring, or a wrong expectation written by the model. Check each one by hand."
+            )
 
     audit_data = rep.get("audit", {})
     if "skipped" in audit_data:

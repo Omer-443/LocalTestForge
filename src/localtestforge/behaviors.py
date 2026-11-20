@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 
-__all__ = ["Behavior", "enumerate_behaviors"]
+__all__ = ["Behavior", "enumerate_behaviors", "enumerate_spec_behaviors", "render_function_spec"]
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,33 @@ def _is_bool_param(arg: ast.arg, default: ast.expr | None) -> bool:
     if arg.annotation is not None and ast.unparse(arg.annotation) == "bool":
         return True
     return bool(default is not None and isinstance(default, ast.Constant) and isinstance(default.value, bool))
+
+
+def _collect_bool_param_descriptions(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[str]:
+    """Return list of descriptions for boolean parameters (True then False for each)."""
+    descs: list[str] = []
+    all_pos = node.args.posonlyargs + node.args.args
+    n_pos = len(all_pos)
+    n_defaults = len(node.args.defaults)
+    for i, arg in enumerate(all_pos):
+        default = (
+            node.args.defaults[i - (n_pos - n_defaults)]
+            if i >= n_pos - n_defaults
+            else None
+        )
+        if _is_bool_param(arg, default):
+            descs.append(f"parameter {arg.arg} is True")
+            descs.append(f"parameter {arg.arg} is False")
+
+    for i, arg in enumerate(node.args.kwonlyargs):
+        kw_default = node.args.kw_defaults[i]
+        if _is_bool_param(arg, kw_default):
+            descs.append(f"parameter {arg.arg} is True")
+            descs.append(f"parameter {arg.arg} is False")
+
+    return descs
 
 
 def _collect_raises_and_branches(
@@ -106,58 +133,17 @@ def enumerate_behaviors(source: str | ast.Module) -> list[Behavior]:
         behavior_idx += 1
 
         # 2. Param behaviors for boolean-like parameters by parameter position
-        all_pos = node.args.posonlyargs + node.args.args
-        n_pos = len(all_pos)
-        n_defaults = len(node.args.defaults)
-        for i, arg in enumerate(all_pos):
-            default = node.args.defaults[i - (n_pos - n_defaults)] if i >= n_pos - n_defaults else None
-            if _is_bool_param(arg, default):
-                b_id_true = f"B{behavior_idx:03d}"
-                behaviors.append(
-                    Behavior(
-                        id=b_id_true,
-                        kind="param",
-                        description=f"parameter {arg.arg} is True",
-                        function_name=func_name,
-                    )
+        for desc in _collect_bool_param_descriptions(node):
+            b_id = f"B{behavior_idx:03d}"
+            behaviors.append(
+                Behavior(
+                    id=b_id,
+                    kind="param",
+                    description=desc,
+                    function_name=func_name,
                 )
-                behavior_idx += 1
-
-                b_id_false = f"B{behavior_idx:03d}"
-                behaviors.append(
-                    Behavior(
-                        id=b_id_false,
-                        kind="param",
-                        description=f"parameter {arg.arg} is False",
-                        function_name=func_name,
-                    )
-                )
-                behavior_idx += 1
-
-        for i, arg in enumerate(node.args.kwonlyargs):
-            kw_default = node.args.kw_defaults[i]
-            if _is_bool_param(arg, kw_default):
-                b_id_true = f"B{behavior_idx:03d}"
-                behaviors.append(
-                    Behavior(
-                        id=b_id_true,
-                        kind="param",
-                        description=f"parameter {arg.arg} is True",
-                        function_name=func_name,
-                    )
-                )
-                behavior_idx += 1
-
-                b_id_false = f"B{behavior_idx:03d}"
-                behaviors.append(
-                    Behavior(
-                        id=b_id_false,
-                        kind="param",
-                        description=f"parameter {arg.arg} is False",
-                        function_name=func_name,
-                    )
-                )
-                behavior_idx += 1
+            )
+            behavior_idx += 1
 
         # 3. Raises and branches by source line
         raise_and_branches = _collect_raises_and_branches(node)
@@ -174,3 +160,113 @@ def enumerate_behaviors(source: str | ast.Module) -> list[Behavior]:
             behavior_idx += 1
 
     return behaviors
+
+
+def enumerate_spec_behaviors(
+    source: str | ast.Module,
+    warnings: list[str] | None = None,
+) -> list[Behavior]:
+    """Enumerate behaviors across public functions using signature and docstrings only.
+
+    The implementation body is never inspected.
+    Per public function:
+      - 1 "normal" behavior
+      - 1 "param" behavior per boolean-like parameter and value (True / False)
+      - 1 "spec_claim" behavior per docstring bullet line (lines starting with "- " or "* "),
+        with description "docstring claim: <text>"
+    If a function has no docstring, enumerate only normal and param, and add a warning.
+    """
+    tree = ast.parse(source) if isinstance(source, str) else source
+    behaviors: list[Behavior] = []
+    behavior_idx = 1
+
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_"):
+            continue
+
+        func_name = node.name
+
+        # 1. Normal behavior
+        b_id = f"B{behavior_idx:03d}"
+        behaviors.append(
+            Behavior(
+                id=b_id,
+                kind="normal",
+                description=f"normal execution of {func_name}",
+                function_name=func_name,
+            )
+        )
+        behavior_idx += 1
+
+        # 2. Param behaviors for boolean-like parameters
+        for desc in _collect_bool_param_descriptions(node):
+            b_id = f"B{behavior_idx:03d}"
+            behaviors.append(
+                Behavior(
+                    id=b_id,
+                    kind="param",
+                    description=desc,
+                    function_name=func_name,
+                )
+            )
+            behavior_idx += 1
+
+        # 3. Spec claims from docstring bullet lines
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring is None or not docstring.strip():
+            if warnings is not None:
+                warnings.append(f"function '{func_name}' has no docstring")
+        else:
+            for line in docstring.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("- ", "* ")):
+                    claim_text = stripped[2:].strip()
+                    b_id = f"B{behavior_idx:03d}"
+                    behaviors.append(
+                        Behavior(
+                            id=b_id,
+                            kind="spec_claim",
+                            description=f"docstring claim: {claim_text}",
+                            function_name=func_name,
+                        )
+                    )
+                    behavior_idx += 1
+
+    return behaviors
+
+
+def render_function_spec(func_node: ast.FunctionDef | ast.AsyncFunctionDef | str) -> str:
+    """Render a function's specification only (signature plus docstring).
+
+    The function body is replaced with just the docstring (or pass if absent),
+    ensuring that the implementation body cannot leak.
+    """
+    import copy
+
+    if isinstance(func_node, str):
+        parsed = ast.parse(func_node)
+        for stmt in parsed.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                func_node = stmt
+                break
+        else:
+            raise ValueError("No function found in source string")
+
+    spec_node = copy.deepcopy(func_node)
+    docstring_stmt: ast.stmt | None = None
+    if (
+        spec_node.body
+        and isinstance(spec_node.body[0], ast.Expr)
+        and isinstance(spec_node.body[0].value, ast.Constant)
+        and isinstance(spec_node.body[0].value.value, str)
+    ):
+        docstring_stmt = spec_node.body[0]
+
+    if docstring_stmt is not None:
+        spec_node.body = [docstring_stmt]
+    else:
+        spec_node.body = [ast.Pass()]
+
+    return ast.unparse(spec_node)
